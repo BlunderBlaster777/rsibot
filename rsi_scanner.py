@@ -167,7 +167,7 @@ def build_email(results, args):
     """Return (subject, plain text, html) for the scan results."""
     signals = sorted((r for r in results if r["signal"]), key=lambda r: r["rsi"])
     oversold = [r for r in signals if r["signal"] == "OVERSOLD"]
-    overbought = [r for r in signals if r["signal"] == "OVERBOUGHT"]
+    overbought = [r for r in reversed(signals) if r["signal"] == "OVERBOUGHT"]
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     subject = (f"RSI scan {date}: {len(oversold)} oversold, {len(overbought)} overbought"
                if signals else f"RSI scan {date}: no signals")
