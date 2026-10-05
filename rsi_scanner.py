@@ -19,18 +19,19 @@ FREE_BASE = "https://api.coingecko.com/api/v3"
 PRO_BASE = "https://pro-api.coingecko.com/api/v3"
 
 # Categories to drop by default: they either don't move (stablecoins) or just
-# mirror another coin's price (wrapped / staked / bridged versions).
+# mirror another asset's price (wrapped / staked / bridged versions, gold).
 DEFAULT_EXCLUDE_CATEGORIES = [
     "stablecoins",
     "wrapped-tokens",
     "liquid-staking-tokens",
     "bridged-tokens",
+    "tokenized-gold",
 ]
 
-# Coins that some EVM chain borrows as its gas token (Bitcoin L2s, XRPL EVM,
-# Milkomeda, Etherlink, ...) but whose home chain is not EVM. Without this they'd
-# be picked up as "native coins of an EVM chain".
-NON_EVM_GAS_COINS = {
+# Coins whose home chain is not EVM but that would otherwise match: some EVM
+# chain uses them as gas (Bitcoin L2s, XRPL EVM, Milkomeda, Etherlink, ...) or
+# they have a bridged contract on an EVM chain (TON, ...).
+NON_EVM_COINS = {
     "bitcoin", "ripple", "cardano", "tezos", "the-open-network", "bitcoin-cash",
     "eos", "flow", "iota", "zilliqa", "nuls", "defichain", "bittensor", "near",
 }
@@ -87,7 +88,7 @@ def evm_platforms(cg):
     platforms = cg.get("/asset_platforms")
     evm = [p for p in platforms if p.get("chain_identifier") is not None]
     native = {p["native_coin_id"] for p in evm if p.get("native_coin_id")}
-    return {p["id"] for p in evm}, native - NON_EVM_GAS_COINS
+    return {p["id"] for p in evm}, native
 
 
 def evm_coin_ids(cg):
@@ -97,7 +98,7 @@ def evm_coin_ids(cg):
     for coin in coins:
         if any(p in platform_ids and addr for p, addr in (coin.get("platforms") or {}).items()):
             ids.add(coin["id"])
-    return ids
+    return ids - NON_EVM_COINS
 
 
 def category_ids(cg, category, pages):
@@ -173,7 +174,7 @@ def parse_args():
     p.add_argument("--oversold", type=float, default=30, help="oversold threshold (default 30)")
     p.add_argument("--overbought", type=float, default=70, help="overbought threshold (default 70)")
     p.add_argument("--include-stables-and-wrapped", action="store_true",
-                   help="don't drop stablecoins and wrapped/staked/bridged tokens")
+                   help="don't drop stablecoins, tokenized gold and wrapped/staked/bridged tokens")
     p.add_argument("--all", action="store_true",
                    help="print every scanned coin, not just ones past the thresholds")
     p.add_argument("--csv", metavar="PATH", help="also write results to a CSV file")

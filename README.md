@@ -9,11 +9,11 @@ the ones with RSI **under 30 (oversold)** or **over 70 (overbought)**.
    EVM chain ID (Ethereum, BNB Chain, Base, Arbitrum, Polygon, Avalanche, ~270 more) as
    EVM. A coin counts if it's the gas coin of one of those chains (ETH, BNB, AVAX, ...)
    or has a contract address on one. BTC, XRP, ADA and similar coins are excluded even
-   though some EVM sidechains use them as gas (see `NON_EVM_GAS_COINS`).
+   though some EVM sidechains use them as gas or host bridged copies (see `NON_EVM_COINS`).
 2. **Filters for size and liquidity.** It keeps coins from the top 1000 by market cap with
    market cap ≥ $100M and 24h volume ≥ $5M (volume stands in for liquidity).
-   Stablecoins and wrapped, liquid-staking and bridged tokens are dropped because they
-   either don't move or copy another coin's price.
+   Stablecoins, tokenized gold, and wrapped, liquid-staking and bridged tokens are dropped because they
+   either don't move or copy another asset's price.
 3. **Computes RSI.** It pulls price history for each coin and computes Wilder's RSI(14)
    on daily, 4h or 1h candles.
 
@@ -25,7 +25,7 @@ pip install -r requirements.txt
 
 **Get a free CoinGecko Demo API key**: https://www.coingecko.com/en/api/pricing.
 The scanner works without a key, but the keyless rate limit is very low, so a scan
-takes about 3x longer.
+takes several times longer.
 
 ```bash
 export COINGECKO_API_KEY=your-demo-key
@@ -56,7 +56,7 @@ python rsi_scanner.py --oversold 25 --overbought 75
 | `--timeframe` | `1d` | `1d`, `4h` or `1h` candles |
 | `--period` | `14` | RSI period |
 | `--oversold` / `--overbought` | `30` / `70` | Signal thresholds |
-| `--include-stables-and-wrapped` | off | Keep stablecoins and wrapped/staked/bridged tokens |
+| `--include-stables-and-wrapped` | off | Keep stablecoins, tokenized gold and wrapped/staked/bridged tokens |
 | `--all` | off | Print every scanned coin |
 | `--csv PATH` | – | Also write results to CSV |
 | `--api-key` | `$COINGECKO_API_KEY` | CoinGecko key |
@@ -70,7 +70,7 @@ With the defaults (about 150 coins plus about 10 setup calls):
 
 | Plan | Pace | Default scan |
 |---|---|---|
-| No key | 1 call / 6s | ~16 min |
+| No key | 1 call / 6s, often throttled | 20–40 min |
 | Free Demo key | ~27 calls/min | ~6 min |
 | Pro key (`--pro`) | 2 calls/s | ~1.5 min |
 
