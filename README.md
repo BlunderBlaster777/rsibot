@@ -83,9 +83,11 @@ after the daily candle closes. It emails you only when at least one coin is past
    | `COINGECKO_API_KEY` | Your CoinGecko Demo key |
    | `SMTP_USER` | Your Gmail address |
    | `SMTP_PASSWORD` | The 16-character app password |
-   | `EMAIL_TO` | Where to send alerts (comma-separate for several) |
 
 3. **Test it.** Go to **Actions → Daily RSI scan → Run workflow**.
+
+Alerts go to `aj.ryder@outlook.com`. To change that, edit `EMAIL_TO` in the workflow
+(comma-separate for several addresses) or `DEFAULT_EMAIL_TO` in `rsi_scanner.py`.
 
 To get an email every day even when nothing triggers, add `--email-always` to the
 workflow's `run` line. For a provider other than Gmail, also set `SMTP_HOST` and
@@ -94,7 +96,7 @@ workflow's `run` line. For a provider other than Gmail, also set `SMTP_HOST` and
 The same flags work locally:
 
 ```bash
-export SMTP_USER=you@gmail.com SMTP_PASSWORD=your-app-password EMAIL_TO=you@gmail.com
+export SMTP_USER=you@gmail.com SMTP_PASSWORD=your-app-password
 python rsi_scanner.py --max-coins 300 --email
 ```
 

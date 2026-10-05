@@ -40,6 +40,8 @@ NON_EVM_COINS = {
     "eos", "flow", "iota", "zilliqa", "nuls", "defichain", "bittensor", "near",
 }
 
+DEFAULT_EMAIL_TO = "aj.ryder@outlook.com"
+
 # Timeframe -> (endpoint, params). CoinGecko picks candle size from `days`:
 #   market_chart: 2-90 days -> hourly points, >90 days -> daily points
 #   ohlc:         3-30 days -> 4h candles
@@ -161,18 +163,9 @@ def fmt_usd(n):
     return f"${n:,.2f}"
 
 
-def send_email(results, args):
-    """Email the signals via SMTP. Settings come from environment variables."""
+def build_email(results, args):
+    """Return (subject, plain text, html) for the scan results."""
     signals = sorted((r for r in results if r["signal"]), key=lambda r: r["rsi"])
-    if not signals and not args.email_always:
-        print("No signals; skipping email.", file=sys.stderr)
-        return
-
-    env = os.environ
-    missing = [k for k in ("SMTP_USER", "SMTP_PASSWORD", "EMAIL_TO") if not env.get(k)]
-    if missing:
-        sys.exit(f"--email needs these environment variables: {', '.join(missing)}")
-
     oversold = [r for r in signals if r["signal"] == "OVERSOLD"]
     overbought = [r for r in signals if r["signal"] == "OVERBOUGHT"]
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -213,13 +206,29 @@ def send_email(results, args):
                  + html_table(f"Oversold (RSI &lt; {args.oversold:g})", oversold, "#1a7f37")
                  + html_table(f"Overbought (RSI &gt; {args.overbought:g})", overbought, "#cf222e")
                  + ("" if signals else "<p>No coins past the RSI thresholds today.</p>"))
+    return subject, "\n".join(text), f"<html><body>{body_html}</body></html>"
 
+
+def send_email(results, args):
+    """Email the signals via SMTP. Settings come from environment variables."""
+    signals = [r for r in results if r["signal"]]
+    if not signals and not args.email_always:
+        print("No signals; skipping email.", file=sys.stderr)
+        return
+
+    env = os.environ
+    missing = [k for k in ("SMTP_USER", "SMTP_PASSWORD") if not env.get(k)]
+    if missing:
+        sys.exit(f"--email needs these environment variables: {', '.join(missing)}")
+    to = env.get("EMAIL_TO") or DEFAULT_EMAIL_TO
+
+    subject, text, body_html = build_email(results, args)
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = env.get("EMAIL_FROM") or env["SMTP_USER"]
-    msg["To"] = env["EMAIL_TO"]
-    msg.set_content("\n".join(text))
-    msg.add_alternative(f"<html><body>{body_html}</body></html>", subtype="html")
+    msg["To"] = to
+    msg.set_content(text)
+    msg.add_alternative(body_html, subtype="html")
 
     host = env.get("SMTP_HOST") or "smtp.gmail.com"
     port = int(env.get("SMTP_PORT") or 587)
@@ -227,7 +236,7 @@ def send_email(results, args):
         smtp.starttls()
         smtp.login(env["SMTP_USER"], env["SMTP_PASSWORD"])
         smtp.send_message(msg)
-    print(f"Emailed {len(signals)} signals to {env['EMAIL_TO']}", file=sys.stderr)
+    print(f"Emailed {len(signals)} signals to {to}", file=sys.stderr)
 
 
 def parse_args():
