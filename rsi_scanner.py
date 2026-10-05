@@ -2,7 +2,7 @@
 """Scan large-cap, liquid EVM coins on CoinGecko for oversold / overbought RSI.
 
 A coin counts as "EVM" if it is the native coin of an EVM chain (ETH, BNB,
-AVAX, ...) or has a contract address on any EVM chain. EVM chains are taken
+AVAX, ...) or a token whose home chain is EVM. EVM chains are taken
 from CoinGecko's /asset_platforms: every platform with a numeric
 chain_identifier (the EVM chain ID).
 """
@@ -13,7 +13,9 @@ import html
 import os
 import smtplib
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.message import EmailMessage
 
@@ -23,18 +25,19 @@ FREE_BASE = "https://api.coingecko.com/api/v3"
 PRO_BASE = "https://pro-api.coingecko.com/api/v3"
 
 # Categories to drop by default: they either don't move (stablecoins) or just
-# mirror another asset's price (wrapped / staked / bridged versions, gold).
+# mirror another asset's price (wrapped / staked / bridged versions, gold,
+# tokenized stocks).
 DEFAULT_EXCLUDE_CATEGORIES = [
     "stablecoins",
     "wrapped-tokens",
     "liquid-staking-tokens",
     "bridged-tokens",
     "tokenized-gold",
+    "tokenized-stock",
 ]
 
-# Coins whose home chain is not EVM but that would otherwise match: some EVM
-# chain uses them as gas (Bitcoin L2s, XRPL EVM, Milkomeda, Etherlink, ...) or
-# they have a bridged contract on an EVM chain (TON, ...).
+# Coins whose home chain is not EVM but that some EVM chain uses as its gas
+# token (Bitcoin L2s, XRPL EVM, Milkomeda, Etherlink, ...).
 NON_EVM_COINS = {
     "bitcoin", "ripple", "cardano", "tezos", "the-open-network", "bitcoin-cash",
     "eos", "flow", "iota", "zilliqa", "nuls", "defichain", "bittensor", "near",
@@ -53,25 +56,57 @@ TIMEFRAMES = {
 
 
 class CoinGecko:
-    def __init__(self, api_key=None, pro=False, delay=None):
+    def __init__(self, api_key=None, pro=None, delay=None):
         self.session = requests.Session()
-        self.base = PRO_BASE if pro else FREE_BASE
+        self.api_key = api_key
+        if api_key and pro is None:
+            pro = self._is_pro_key(api_key)
+        self.pro = bool(pro)
+        self.base = PRO_BASE if self.pro else FREE_BASE
         if api_key:
-            header = "x-cg-pro-api-key" if pro else "x-cg-demo-api-key"
+            header = "x-cg-pro-api-key" if self.pro else "x-cg-demo-api-key"
             self.session.headers[header] = api_key
-        # Pro: 500+ calls/min. Free demo key: 100/min (10,000/month). No key:
-        # the shared public limit, which is much lower and varies, so go slow.
+        # Paid plans: 500+ calls/min (we aim for ~450). Free demo key: 100/min.
+        # No key: the shared public limit, which is much lower and varies.
         if delay is None:
-            delay = 0.2 if pro else 0.7 if api_key else 6.0
+            delay = 0.135 if self.pro else 0.7 if api_key else 6.0
         self.delay = delay
-        self._last_call = 0.0
+        self._lock = threading.Lock()
+        self._next_slot = 0.0
+
+    def _is_pro_key(self, api_key):
+        """Paid (Pro/Lite/...) keys only work on pro-api; demo keys only on api."""
+        for attempt in range(4):
+            try:
+                resp = requests.get(PRO_BASE + "/ping", timeout=15,
+                                    headers={"x-cg-pro-api-key": api_key})
+                if resp.status_code == 200:
+                    return True
+                if resp.status_code in (400, 401, 403):
+                    break
+            except requests.RequestException:
+                pass
+            time.sleep(5 * (attempt + 1))  # rate limited or network trouble
+        # The free endpoint rejects paid keys with an "use pro-api" error.
+        try:
+            resp = requests.get(FREE_BASE + "/ping", timeout=15,
+                                headers={"x-cg-demo-api-key": api_key})
+            return resp.status_code == 400 and "pro-api" in resp.text
+        except requests.RequestException:
+            return False
+
+    def _wait_turn(self):
+        # Hand out evenly spaced call slots so parallel workers share one rate limit.
+        with self._lock:
+            now = time.monotonic()
+            slot = max(now, self._next_slot)
+            self._next_slot = slot + self.delay
+        if slot > now:
+            time.sleep(slot - now)
 
     def get(self, path, **params):
         for attempt in range(6):
-            wait = self.delay - (time.monotonic() - self._last_call)
-            if wait > 0:
-                time.sleep(wait)
-            self._last_call = time.monotonic()
+            self._wait_turn()
             try:
                 resp = self.session.get(self.base + path, params=params, timeout=30)
             except requests.RequestException as exc:
@@ -80,13 +115,23 @@ class CoinGecko:
                 time.sleep(backoff)
                 continue
             if resp.status_code == 429 or resp.status_code >= 500:
-                backoff = int(resp.headers.get("Retry-After", 0)) or 30 * (attempt + 1)
+                backoff = int(resp.headers.get("Retry-After", 0)) or (
+                    10 if self.pro else 30) * (attempt + 1)
                 print(f"  HTTP {resp.status_code} on {path}; waiting {backoff}s", file=sys.stderr)
                 time.sleep(backoff)
                 continue
             resp.raise_for_status()
             return resp.json()
         raise RuntimeError(f"giving up on {path} after repeated failures")
+
+    def usage(self):
+        """Monthly credit usage for paid keys, or None."""
+        if not self.pro:
+            return None
+        try:
+            return self.get("/key")
+        except (requests.HTTPError, RuntimeError):
+            return None
 
 
 def evm_platforms(cg):
@@ -102,7 +147,10 @@ def evm_coin_ids(cg):
     coins = cg.get("/coins/list", include_platform="true")
     ids = set(native_ids)
     for coin in coins:
-        if any(p in platform_ids and addr for p, addr in (coin.get("platforms") or {}).items()):
+        # The first platform listed is the token's home chain. Later ones are
+        # bridged copies, which non-EVM coins (ICP, TON, ...) often have too.
+        home = next(iter((coin.get("platforms") or {}).items()), None)
+        if home and home[0] in platform_ids and home[1]:
             ids.add(coin["id"])
     return ids - NON_EVM_COINS
 
@@ -135,6 +183,20 @@ def closes(cg, coin_id, timeframe):
     if endpoint == "ohlc":
         return [row[4] for row in data]
     return [price for _, price in data.get("prices", [])]
+
+
+def bad_history(values, current_price, period):
+    """Reason to distrust a price history for RSI, or None if it looks fine."""
+    # Wilder's smoothing needs a few periods of history to settle.
+    if len(values) < 3 * period + 1:
+        return f"only {len(values)} candles of history"
+    if any(v is None or v <= 0 for v in values[-(3 * period + 1):]):
+        return "zero or missing prices in the chart"
+    # The chart's last point is the live price; if it disagrees with the
+    # market data, the chart is stale or broken.
+    if current_price and abs(values[-1] / current_price - 1) > 0.5:
+        return f"chart price {values[-1]:.6g} doesn't match market price {current_price:.6g}"
+    return None
 
 
 def rsi(values, period=14):
@@ -242,14 +304,14 @@ def send_email(results, args):
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--min-mcap", type=float, default=100e6,
-                   help="minimum market cap in USD (default 100M)")
-    p.add_argument("--min-volume", type=float, default=5e6,
-                   help="minimum 24h volume in USD, used as the liquidity filter (default 5M)")
-    p.add_argument("--max-coins", type=int, default=150,
-                   help="max coins to compute RSI for, largest first (default 150)")
-    p.add_argument("--pages", type=int, default=4,
-                   help="pages of 250 coins to pull by market cap (default 4 = top 1000)")
+    p.add_argument("--min-mcap", type=float, default=25e6,
+                   help="minimum market cap in USD (default 25M)")
+    p.add_argument("--min-volume", type=float, default=1e6,
+                   help="minimum 24h volume in USD, used as the liquidity filter (default 1M)")
+    p.add_argument("--max-coins", type=int, default=0,
+                   help="max coins to compute RSI for, largest first (default 0 = no cap)")
+    p.add_argument("--pages", type=int, default=8,
+                   help="pages of 250 coins to pull by market cap (default 8 = top 2000)")
     p.add_argument("--timeframe", choices=TIMEFRAMES, default="1d",
                    help="candle timeframe for RSI (default 1d)")
     p.add_argument("--period", type=int, default=14, help="RSI period (default 14)")
@@ -262,9 +324,11 @@ def parse_args():
     p.add_argument("--csv", metavar="PATH", help="also write results to a CSV file")
     p.add_argument("--api-key", default=os.environ.get("COINGECKO_API_KEY"),
                    help="CoinGecko API key (or set COINGECKO_API_KEY)")
-    p.add_argument("--pro", action="store_true",
-                   help="key is a paid Pro key (uses pro-api.coingecko.com)")
+    p.add_argument("--pro", action="store_true", default=None,
+                   help="force the paid-plan API (normally detected from the key)")
     p.add_argument("--delay", type=float, help="seconds between API calls")
+    p.add_argument("--workers", type=int, default=8,
+                   help="parallel requests for paid keys (default 8)")
     p.add_argument("--email", action="store_true",
                    help="email the signals (SMTP settings from environment variables)")
     p.add_argument("--email-always", action="store_true",
@@ -275,6 +339,8 @@ def parse_args():
 def main():
     args = parse_args()
     cg = CoinGecko(args.api_key, args.pro, args.delay)
+    plan = "paid plan" if cg.pro else "demo key" if args.api_key else "no API key"
+    print(f"Using CoinGecko {plan}.", file=sys.stderr)
 
     print("Loading EVM chains and coin list...", file=sys.stderr)
     evm_ids = evm_coin_ids(cg)
@@ -283,7 +349,7 @@ def main():
     if not args.include_stables_and_wrapped:
         for cat in DEFAULT_EXCLUDE_CATEGORIES:
             print(f"Loading excluded category: {cat}", file=sys.stderr)
-            excluded |= category_ids(cg, cat, pages=2)
+            excluded |= category_ids(cg, cat, pages=8)
 
     print(f"Loading top {args.pages * 250} coins by market cap...", file=sys.stderr)
     markets = top_markets(cg, args.pages)
@@ -293,23 +359,40 @@ def main():
         and m["id"] not in excluded
         and (m.get("market_cap") or 0) >= args.min_mcap
         and (m.get("total_volume") or 0) >= args.min_volume
-    ][: args.max_coins]
+    ]
+    if args.max_coins:
+        candidates = candidates[: args.max_coins]
     print(f"{len(candidates)} EVM coins pass the filters; computing {args.timeframe} "
           f"RSI({args.period})...", file=sys.stderr)
 
-    results = []
-    for i, m in enumerate(candidates, 1):
+    def coin_rsi(m):
         try:
-            value = rsi(closes(cg, m["id"], args.timeframe), args.period)
+            values = closes(cg, m["id"], args.timeframe)
         except (requests.HTTPError, RuntimeError) as exc:
-            print(f"  [{i}/{len(candidates)}] {m['symbol'].upper()}: skipped ({exc})", file=sys.stderr)
-            continue
+            print(f"  {m['symbol'].upper()}: skipped ({exc})", file=sys.stderr)
+            return None
+        problem = bad_history(values, m.get("current_price"), args.period)
+        if problem:
+            print(f"  {m['symbol'].upper()}: skipped ({problem})", file=sys.stderr)
+            return None
+        return rsi(values, args.period)
+
+    # Only paid keys have the headroom for parallel requests; the shared rate
+    # limiter in CoinGecko.get keeps workers under the per-minute cap.
+    workers = max(1, args.workers) if cg.pro else 1
+    started = time.monotonic()
+    with ThreadPoolExecutor(workers) as pool:
+        values = list(pool.map(coin_rsi, candidates))
+    skipped = sum(v is None for v in values)
+    print(f"Fetched {len(candidates)} charts in {time.monotonic() - started:.0f}s"
+          f"{f'; skipped {skipped} with unusable data' if skipped else ''}.", file=sys.stderr)
+
+    results = []
+    for m, value in zip(candidates, values):
         if value is None:
             continue
         signal = ("OVERSOLD" if value < args.oversold
                   else "OVERBOUGHT" if value > args.overbought else "")
-        print(f"  [{i}/{len(candidates)}] {m['symbol'].upper():<8} RSI {value:5.1f} {signal}",
-              file=sys.stderr)
         results.append({
             "id": m["id"],
             "symbol": m["symbol"].upper(),
@@ -351,6 +434,11 @@ def main():
 
     if args.email:
         send_email(results, args)
+
+    usage = cg.usage()
+    if usage:
+        print(f"API credits used this month: {usage.get('api_key_current_total_monthly_calls')}"
+              f" of {usage.get('api_key_monthly_call_credit')}", file=sys.stderr)
 
 
 if __name__ == "__main__":

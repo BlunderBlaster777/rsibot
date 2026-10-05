@@ -7,39 +7,41 @@ the ones with RSI **under 30 (oversold)** or **over 70 (overbought)**.
 
 1. **Finds EVM coins.** It pulls CoinGecko's chain list and treats every chain with an
    EVM chain ID (Ethereum, BNB Chain, Base, Arbitrum, Polygon, Avalanche, ~270 more) as
-   EVM. A coin counts if it's the gas coin of one of those chains (ETH, BNB, AVAX, ...)
-   or has a contract address on one. BTC, XRP, ADA and similar coins are excluded even
-   though some EVM sidechains use them as gas or host bridged copies (see `NON_EVM_COINS`).
-2. **Filters for size and liquidity.** It keeps coins from the top 1000 by market cap with
-   market cap ≥ $100M and 24h volume ≥ $5M (volume stands in for liquidity).
-   Stablecoins, tokenized gold, and wrapped, liquid-staking and bridged tokens are dropped because they
-   either don't move or copy another asset's price.
+   EVM. A coin counts if it's the gas coin of one of those chains (ETH, BNB, AVAX, HYPE,
+   ...) or a token whose **home chain** is one of them. Non-EVM coins with bridged copies
+   on EVM chains (ICP, TON, ...) don't count. BTC, XRP, ADA and similar are excluded even
+   though some EVM sidechains use them as gas (see `NON_EVM_COINS`).
+2. **Filters for size and liquidity.** From the top 2000 coins by market cap, it keeps
+   those with market cap ≥ $25M and 24h volume ≥ $1M (volume stands in for liquidity).
+   That's about 300 coins. Stablecoins, tokenized gold and stocks, and wrapped,
+   liquid-staking and bridged tokens are dropped because they either don't move or copy
+   another asset's price.
 3. **Computes RSI.** It pulls price history for each coin and computes Wilder's RSI(14)
-   on daily, 4h or 1h candles.
+   on daily, 4h or 1h candles. Coins with under ~6 weeks of history or broken chart data
+   are skipped, since their RSI isn't meaningful.
 
 ## Setup
 
 ```bash
 pip install -r requirements.txt
+export COINGECKO_API_KEY=your-key
 ```
 
-**Get a free CoinGecko Demo API key**: https://www.coingecko.com/en/api/pricing
-(100 calls/min, 10,000 calls/month).
-The scanner works without a key, but the keyless rate limit is very low, so a scan
-takes several times longer.
-
-```bash
-export COINGECKO_API_KEY=your-demo-key
-```
+Any CoinGecko key works. The scanner detects whether it's a free Demo key or a paid plan
+(Lite, Pro, ...) and uses the right endpoint and pace. It also runs without a key, but
+the keyless rate limit is very low.
 
 ## Usage
 
 ```bash
-# Default: daily RSI(14), up to 150 coins, mcap >= $100M, volume >= $5M
+# Default: daily RSI(14), every EVM coin with mcap >= $25M and volume >= $1M
 python rsi_scanner.py
 
-# 4h candles, bigger coins only, save to CSV
+# Bigger coins only, 4h candles, save to CSV
 python rsi_scanner.py --timeframe 4h --min-mcap 1e9 --min-volume 20e6 --csv signals.csv
+
+# Even more coins (~550): mcap >= $10M, volume >= $500K
+python rsi_scanner.py --min-mcap 10e6 --min-volume 500e3
 
 # Show every coin scanned, not just the signals
 python rsi_scanner.py --all
@@ -50,25 +52,35 @@ python rsi_scanner.py --oversold 25 --overbought 75
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--min-mcap` | `100e6` | Minimum market cap (USD) |
-| `--min-volume` | `5e6` | Minimum 24h volume (USD) |
-| `--max-coins` | `150` | How many coins to compute RSI for, largest first |
-| `--pages` | `4` | Pages of 250 coins to pull by market cap (4 = top 1000) |
+| `--min-mcap` | `25e6` | Minimum market cap (USD) |
+| `--min-volume` | `1e6` | Minimum 24h volume (USD) |
+| `--max-coins` | `0` (no cap) | Max coins to compute RSI for, largest first |
+| `--pages` | `8` | Pages of 250 coins to pull by market cap (8 = top 2000) |
 | `--timeframe` | `1d` | `1d`, `4h` or `1h` candles |
 | `--period` | `14` | RSI period |
 | `--oversold` / `--overbought` | `30` / `70` | Signal thresholds |
-| `--include-stables-and-wrapped` | off | Keep stablecoins, tokenized gold and wrapped/staked/bridged tokens |
+| `--include-stables-and-wrapped` | off | Keep stablecoins, tokenized gold/stocks and wrapped/staked/bridged tokens |
 | `--all` | off | Print every scanned coin |
 | `--csv PATH` | – | Also write results to CSV |
 | `--api-key` | `$COINGECKO_API_KEY` | CoinGecko key |
-| `--pro` | off | The key is a paid Pro key |
+| `--pro` | auto | Force the paid-plan API (normally detected from the key) |
+| `--workers` | `8` | Parallel requests (paid keys only) |
 | `--delay` | auto | Seconds between API calls |
 | `--email` | off | Email the signals (see below) |
 | `--email-always` | off | With `--email`, also send on days with no signals |
 
+How many coins each filter level scans (October 2026):
+
+| `--min-mcap` | `--min-volume` | Coins |
+|---|---|---|
+| `100e6` | `5e6` | ~105 |
+| `50e6` | `2e6` | ~195 |
+| `25e6` | `1e6` | ~310 (default) |
+| `10e6` | `500e3` | ~550 |
+
 ## Daily email alerts (GitHub Actions)
 
-`.github/workflows/daily-scan.yml` scans up to 300 coins every day at 00:17 UTC, just
+`.github/workflows/daily-scan.yml` scans every coin that passes the filters every day at 00:17 UTC, just
 after the daily candle closes. It emails you only when at least one coin is past 30 or
 70. Each run's CSV is saved as a workflow artifact.
 
@@ -80,7 +92,7 @@ after the daily candle closes. It emails you only when at least one coin is past
 
    | Secret | Value |
    |---|---|
-   | `COINGECKO_API_KEY` | Your CoinGecko Demo key |
+   | `COINGECKO_API_KEY` | Your CoinGecko key (Demo or paid) |
    | `SMTP_USER` | Your Gmail address |
    | `SMTP_PASSWORD` | The 16-character app password |
 
@@ -112,24 +124,25 @@ The same flags work locally:
 
 ```bash
 export SMTP_USER=you@gmail.com SMTP_PASSWORD=your-app-password
-python rsi_scanner.py --max-coins 300 --email
+python rsi_scanner.py --email
 ```
 
-## Speed
+## Speed and API limits
 
-CoinGecko charts one coin per request, so scan time is set by the rate limit.
-Each scan also spends about 12 calls on setup.
+Each coin's chart is one request, plus about 25 setup calls per scan.
 
-| Plan | Pace | 150 coins (default) | 300 coins |
+| Plan | Rate limit | Monthly calls | Default scan (~310 coins) |
 |---|---|---|---|
-| No key | 1 call / 6s, often throttled | 20–40 min | too slow |
-| Free Demo key | ~85 calls/min | ~2 min | ~4 min |
-| Pro key (`--pro`) | 5 calls/s | <1 min | ~1 min |
+| No key | very low, varies | – | 30+ min |
+| Free Demo | 100/min | 10,000 | ~4 min |
+| Paid (Lite and up) | 500/min | 2,000,000 | **~50 s** (8 parallel requests) |
 
-The Demo key's **10,000 calls/month** is the real cap for a daily job. One scan a day of
-about 300 coins (about 9,700 calls/month) is the most that fits. To scan more coins,
-or more than once a day, you need a paid plan. Otherwise use a higher `--min-mcap` to
-spend calls on bigger coins only.
+With a **paid key** the monthly credits are effectively unlimited for this: a default
+daily scan uses about 10,000 credits a month, 0.5% of Lite's 2M. Rate limit was measured
+at 500 calls per rolling minute; the scanner paces itself at ~450/min.
+
+With a **free Demo key**, a daily default scan uses about 10,500 calls a month, just
+over the 10,000 cap. Add `--max-coins 300` or raise `--min-mcap` to stay under it.
 
 *Not financial advice. RSI is one momentum signal and can stay extreme for a long time
 in a strong trend.*
