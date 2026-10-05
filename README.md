@@ -23,7 +23,8 @@ the ones with RSI **under 30 (oversold)** or **over 70 (overbought)**.
 pip install -r requirements.txt
 ```
 
-**Get a free CoinGecko Demo API key**: https://www.coingecko.com/en/api/pricing.
+**Get a free CoinGecko Demo API key**: https://www.coingecko.com/en/api/pricing
+(100 calls/min, 10,000 calls/month).
 The scanner works without a key, but the keyless rate limit is very low, so a scan
 takes several times longer.
 
@@ -62,19 +63,56 @@ python rsi_scanner.py --oversold 25 --overbought 75
 | `--api-key` | `$COINGECKO_API_KEY` | CoinGecko key |
 | `--pro` | off | The key is a paid Pro key |
 | `--delay` | auto | Seconds between API calls |
+| `--email` | off | Email the signals (see below) |
+| `--email-always` | off | With `--email`, also send on days with no signals |
+
+## Daily email alerts (GitHub Actions)
+
+`.github/workflows/daily-scan.yml` scans up to 300 coins every day at 00:17 UTC, just
+after the daily candle closes. It emails you only when at least one coin is past 30 or
+70. Each run's CSV is saved as a workflow artifact.
+
+1. **Gmail app password.** In your Google account, turn on 2-Step Verification, then
+   create an app password at https://myaccount.google.com/apppasswords. Your normal
+   Gmail password won't work.
+2. **Repo secrets.** Go to GitHub → repo **Settings → Secrets and variables → Actions →
+   New repository secret** and add:
+
+   | Secret | Value |
+   |---|---|
+   | `COINGECKO_API_KEY` | Your CoinGecko Demo key |
+   | `SMTP_USER` | Your Gmail address |
+   | `SMTP_PASSWORD` | The 16-character app password |
+   | `EMAIL_TO` | Where to send alerts (comma-separate for several) |
+
+3. **Test it.** Go to **Actions → Daily RSI scan → Run workflow**.
+
+To get an email every day even when nothing triggers, add `--email-always` to the
+workflow's `run` line. For a provider other than Gmail, also set `SMTP_HOST` and
+`SMTP_PORT` (STARTTLS, default `smtp.gmail.com:587`) and optionally `EMAIL_FROM`.
+
+The same flags work locally:
+
+```bash
+export SMTP_USER=you@gmail.com SMTP_PASSWORD=your-app-password EMAIL_TO=you@gmail.com
+python rsi_scanner.py --max-coins 300 --email
+```
 
 ## Speed
 
 CoinGecko charts one coin per request, so scan time is set by the rate limit.
-With the defaults (about 150 coins plus about 10 setup calls):
+Each scan also spends about 12 calls on setup.
 
-| Plan | Pace | Default scan |
-|---|---|---|
-| No key | 1 call / 6s, often throttled | 20–40 min |
-| Free Demo key | ~27 calls/min | ~6 min |
-| Pro key (`--pro`) | 2 calls/s | ~1.5 min |
+| Plan | Pace | 150 coins (default) | 300 coins |
+|---|---|---|---|
+| No key | 1 call / 6s, often throttled | 20–40 min | too slow |
+| Free Demo key | ~85 calls/min | ~2 min | ~4 min |
+| Pro key (`--pro`) | 5 calls/s | <1 min | ~1 min |
 
-Use `--max-coins` or a higher `--min-mcap` to scan fewer coins.
+The Demo key's **10,000 calls/month** is the real cap for a daily job. One scan a day of
+about 300 coins (about 9,700 calls/month) is the most that fits. To scan more coins,
+or more than once a day, you need a paid plan. Otherwise use a higher `--min-mcap` to
+spend calls on bigger coins only.
 
 *Not financial advice. RSI is one momentum signal and can stay extreme for a long time
 in a strong trend.*

@@ -9,9 +9,13 @@ chain_identifier (the EVM chain ID).
 
 import argparse
 import csv
+import html
 import os
+import smtplib
 import sys
 import time
+from datetime import datetime, timezone
+from email.message import EmailMessage
 
 import requests
 
@@ -53,10 +57,10 @@ class CoinGecko:
         if api_key:
             header = "x-cg-pro-api-key" if pro else "x-cg-demo-api-key"
             self.session.headers[header] = api_key
-        # Pro: 500+ calls/min. Free demo key: 30/min. No key: the shared public
-        # limit, which is much lower and varies, so go slow.
+        # Pro: 500+ calls/min. Free demo key: 100/min (10,000/month). No key:
+        # the shared public limit, which is much lower and varies, so go slow.
         if delay is None:
-            delay = 0.5 if pro else 2.2 if api_key else 6.0
+            delay = 0.2 if pro else 0.7 if api_key else 6.0
         self.delay = delay
         self._last_call = 0.0
 
@@ -157,6 +161,75 @@ def fmt_usd(n):
     return f"${n:,.2f}"
 
 
+def send_email(results, args):
+    """Email the signals via SMTP. Settings come from environment variables."""
+    signals = sorted((r for r in results if r["signal"]), key=lambda r: r["rsi"])
+    if not signals and not args.email_always:
+        print("No signals; skipping email.", file=sys.stderr)
+        return
+
+    env = os.environ
+    missing = [k for k in ("SMTP_USER", "SMTP_PASSWORD", "EMAIL_TO") if not env.get(k)]
+    if missing:
+        sys.exit(f"--email needs these environment variables: {', '.join(missing)}")
+
+    oversold = [r for r in signals if r["signal"] == "OVERSOLD"]
+    overbought = [r for r in signals if r["signal"] == "OVERBOUGHT"]
+    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    subject = (f"RSI scan {date}: {len(oversold)} oversold, {len(overbought)} overbought"
+               if signals else f"RSI scan {date}: no signals")
+
+    def text_rows(rows):
+        return "\n".join(f"  {r['symbol']:<8} {r['name'][:24]:<25} RSI {r['rsi']:5.1f}  "
+                         f"${r['price']:.6g}  mcap {fmt_usd(r['market_cap'])}" for r in rows)
+
+    def html_table(title, rows, color):
+        if not rows:
+            return ""
+        cells = "".join(
+            f"<tr><td><b>{html.escape(r['symbol'])}</b></td><td>{html.escape(r['name'])}</td>"
+            f"<td align='right' style='color:{color}'><b>{r['rsi']:.1f}</b></td>"
+            f"<td align='right'>${r['price']:.6g}</td>"
+            f"<td align='right'>{fmt_usd(r['market_cap'])}</td>"
+            f"<td align='right'>{fmt_usd(r['volume_24h'])}</td>"
+            f"<td><a href='https://www.coingecko.com/en/coins/{r['id']}'>chart</a></td></tr>"
+            for r in rows)
+        return (f"<h3 style='color:{color}'>{title}</h3>"
+                "<table cellpadding='6' style='border-collapse:collapse;font-family:sans-serif'>"
+                "<tr style='background:#f0f0f0'><th align='left'>Symbol</th><th align='left'>Name</th>"
+                "<th>RSI</th><th>Price</th><th>Mcap</th><th>Vol 24h</th><th></th></tr>"
+                f"{cells}</table>")
+
+    settings = (f"{args.timeframe} RSI({args.period}), {len(results)} EVM coins scanned, "
+                f"mcap >= {fmt_usd(args.min_mcap)}, 24h volume >= {fmt_usd(args.min_volume)}")
+    text = [subject, settings, ""]
+    if oversold:
+        text += [f"OVERSOLD (RSI < {args.oversold:g})", text_rows(oversold), ""]
+    if overbought:
+        text += [f"OVERBOUGHT (RSI > {args.overbought:g})", text_rows(overbought), ""]
+    if not signals:
+        text.append("No coins past the RSI thresholds today.")
+    body_html = (f"<p style='font-family:sans-serif;color:#555'>{html.escape(settings)}</p>"
+                 + html_table(f"Oversold (RSI &lt; {args.oversold:g})", oversold, "#1a7f37")
+                 + html_table(f"Overbought (RSI &gt; {args.overbought:g})", overbought, "#cf222e")
+                 + ("" if signals else "<p>No coins past the RSI thresholds today.</p>"))
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = env.get("EMAIL_FROM") or env["SMTP_USER"]
+    msg["To"] = env["EMAIL_TO"]
+    msg.set_content("\n".join(text))
+    msg.add_alternative(f"<html><body>{body_html}</body></html>", subtype="html")
+
+    host = env.get("SMTP_HOST") or "smtp.gmail.com"
+    port = int(env.get("SMTP_PORT") or 587)
+    with smtplib.SMTP(host, port, timeout=30) as smtp:
+        smtp.starttls()
+        smtp.login(env["SMTP_USER"], env["SMTP_PASSWORD"])
+        smtp.send_message(msg)
+    print(f"Emailed {len(signals)} signals to {env['EMAIL_TO']}", file=sys.stderr)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -183,6 +256,10 @@ def parse_args():
     p.add_argument("--pro", action="store_true",
                    help="key is a paid Pro key (uses pro-api.coingecko.com)")
     p.add_argument("--delay", type=float, help="seconds between API calls")
+    p.add_argument("--email", action="store_true",
+                   help="email the signals (SMTP settings from environment variables)")
+    p.add_argument("--email-always", action="store_true",
+                   help="with --email, send even when there are no signals")
     return p.parse_args()
 
 
@@ -262,6 +339,9 @@ def main():
             writer.writeheader()
             writer.writerows(shown)
         print(f"Wrote {len(shown)} rows to {args.csv}")
+
+    if args.email:
+        send_email(results, args)
 
 
 if __name__ == "__main__":
