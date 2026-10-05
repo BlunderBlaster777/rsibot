@@ -86,6 +86,21 @@ after the daily candle closes. It emails you only when at least one coin is past
 
 3. **Test it.** Go to **Actions → Daily RSI scan → Run workflow**.
 
+**Can't get a Gmail app password?** (Common with work/Google Workspace accounts.) Use a
+free [Brevo](https://www.brevo.com/) account instead (300 emails/day free):
+
+1. Sign up, then add and verify your sender address under **Senders, Domains & Dedicated IPs → Senders**.
+2. Under **SMTP & API → SMTP**, generate an SMTP key.
+3. Set these repository secrets instead of the Gmail ones:
+
+   | Secret | Value |
+   |---|---|
+   | `SMTP_HOST` | `smtp-relay.brevo.com` |
+   | `SMTP_PORT` | `587` |
+   | `SMTP_USER` | The SMTP **login** shown on that page (looks like `xxxx@smtp-brevo.com`) |
+   | `SMTP_PASSWORD` | The SMTP key |
+   | `EMAIL_FROM` | Your verified sender address |
+
 Alerts go to `aj.ryder@outlook.com`. To change that, edit `EMAIL_TO` in the workflow
 (comma-separate for several addresses) or `DEFAULT_EMAIL_TO` in `rsi_scanner.py`.
 
